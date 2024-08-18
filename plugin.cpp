@@ -5,6 +5,9 @@
 #include <codecvt>
 #include <filesystem>
 #include <ShlObj.h>
+#include <cstdio>
+#include <tlhelp32.h>
+#include <comdef.h>
 
 /**
 * Set the environment path to store Mantella.exe data
@@ -23,7 +26,7 @@ bool SetEnvironmentTempPath() {
     // Get the path to the Documents folder
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, NULL, &documentsPath))) {
         newTempPath = std::wstring(documentsPath) + L"\\My Games\\Mantella\\data\\tmp";
-        CoTaskMemFree(documentsPath); // Release the memory
+        CoTaskMemFree(documentsPath);  // Release the memory
 
         // Attempt to create the directory path if it doesn't exist
         try {
@@ -60,7 +63,7 @@ bool SetEnvironmentTempPath() {
     }
 
     return true;
-}
+};
 
 
 // Common function to get module directory
@@ -90,31 +93,49 @@ std::wstring GetModuleDirectoryBase(int levels_up) {
     }
 
     return fs_path.wstring();
-}
+};
 
 
 // Helper function to retrieve the current module's directory
 std::wstring GetCurrentModuleDirectory() {
     return GetModuleDirectoryBase(1);  // Go up one level (parent directory)
-}
+};
 
 
 // Helper function to retrieve the top-level game directory
 std::wstring GetTopLevelDirectory() {
     return GetModuleDirectoryBase(4);  // Go up four levels to game directory
-}
+};
 
 
 // Function to convert wchar_t* to std::string
 std::string WideStringToString(const wchar_t* wideString) {
     std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
     return converter.to_bytes(wideString);
-}
+};
 
+// Finds all running processes called 'Mantella.exe'. It should be pretty safe to assume that ours are the only ones running on the system.
+// Acquires HANDLE's with PROCESS_QUERY_INFORMATION and PROCESS_TERMINATE access rights to them.
+std::vector<HANDLE> LocateExistingMantellaProcesses() {
+    PROCESSENTRY32 entry;
+    entry.dwSize = sizeof(PROCESSENTRY32);
 
-// Declare a global variable to store the process handle
-HANDLE g_hMantellaProcess = NULL;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    std::vector<HANDLE> result;
+    if (Process32First(snapshot, &entry) == TRUE) {
+        while (Process32Next(snapshot, &entry) == TRUE) {
+            _bstr_t b(entry.szExeFile);
+            const char* fileName = b;
+            if (stricmp(fileName, "Mantella.exe") == 0) {
+                result.push_back(OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_TERMINATE, FALSE, entry.th32ProcessID));
+            }
+        }
+    }
 
+    CloseHandle(snapshot);
+
+    return result;
+};
 
 /**
 * Launch Mantella.exe
@@ -131,7 +152,7 @@ bool LaunchMantellaExe() {
     std::wstring exePath = moduleDir + L"\\MantellaSoftware\\Mantella.exe";  // Construct the full path to Mantella.exe
 
     if (!SetEnvironmentTempPath()) {
-       return false;  // TODO: Handle error
+        return false;  // TODO: Handle error
     }
 
     // Convert the full path to a narrow string for printing (optional)
@@ -145,32 +166,31 @@ bool LaunchMantellaExe() {
 
     std::wstring commandLine = exePath + L" " + params;
 
-    // Check if Mantella.exe is already running using the stored process handle
-    if (g_hMantellaProcess != NULL) {
-        DWORD exitCode;
-        if (GetExitCodeProcess(g_hMantellaProcess, &exitCode) && exitCode == STILL_ACTIVE) {
-            // Mantella.exe is still running, terminate it
-            if (!TerminateProcess(g_hMantellaProcess, 0)) {
-                std::stringstream ss;
-                ss << "Failed to terminate existing Mantella.exe process. TerminateProcess error: " << GetLastError();
-                RE::ConsoleLog::GetSingleton()->Print(ss.str().c_str());
-                CloseHandle(g_hMantellaProcess);
-                g_hMantellaProcess = NULL;
-                return false;
+    std::vector<HANDLE> currentMantellaProcesses = LocateExistingMantellaProcesses();
+    // Check if Mantella.exe is already running and if yes, close all of them
+    for (const HANDLE& currentMantellaProcess : currentMantellaProcesses) {
+        if (currentMantellaProcess != NULL) {
+            DWORD exitCode;
+            if (GetExitCodeProcess(currentMantellaProcess, &exitCode) && exitCode == STILL_ACTIVE) {
+                // Mantella.exe is still running, terminate it
+                if (!TerminateProcess(currentMantellaProcess, 0)) {
+                    std::stringstream ss;
+                    ss << "Failed to terminate existing Mantella.exe process. TerminateProcess error: "
+                       << GetLastError();
+                    RE::ConsoleLog::GetSingleton()->Print(ss.str().c_str());
+                }
+                WaitForSingleObject(currentMantellaProcess, INFINITE);  // Ensure the process is completely terminated
+                RE::ConsoleLog::GetSingleton()->Print("Existing Mantella.exe process terminated.");
+            } else {
+                // Process is not active, close the handle
             }
-            WaitForSingleObject(g_hMantellaProcess, INFINITE);  // Ensure the process is completely terminated
-            CloseHandle(g_hMantellaProcess);
-            g_hMantellaProcess = NULL;
-            RE::ConsoleLog::GetSingleton()->Print("Existing Mantella.exe process terminated.");
-        } else {
-            // Process is not active, close the handle
-            CloseHandle(g_hMantellaProcess);
-            g_hMantellaProcess = NULL;
+            CloseHandle(currentMantellaProcess);
         }
     }
 
     // Start Mantella.exe
-    if (!CreateProcess(NULL, &commandLine[0], NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, moduleDir.c_str(), &si, &pi)) {
+    if (!CreateProcess(NULL, &commandLine[0], NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, moduleDir.c_str(), &si,
+                       &pi)) {
         std::stringstream ss;
         ss << "Failed to launch Mantella.exe. CreateProcess error: " << GetLastError();
         RE::ConsoleLog::GetSingleton()->Print(ss.str().c_str());
@@ -179,39 +199,47 @@ bool LaunchMantellaExe() {
         SetConsoleTitle(L"Mantella");
     }
 
-    // Store the process handle in the global variable and close thread handle
-    g_hMantellaProcess = pi.hProcess;
+    //Close thread handle
     CloseHandle(pi.hThread);
 
     return true;
-}
+};
 
 
-bool LaunchMantellaExePapyrus(RE::StaticFunctionTag*) { return LaunchMantellaExe; }
+
+bool LaunchMantellaExePapyrus(RE::StaticFunctionTag*) { 
+    return LaunchMantellaExe(); 
+};
 
 
-bool PapyrusFunctions(RE::BSScript::IVirtualMachine* vm) { 
+bool PapyrusFunctions(RE::BSScript::IVirtualMachine* vm) {
     vm->RegisterFunction("LaunchMantellaExe", "MantellaLauncher", LaunchMantellaExePapyrus);
-    return true; 
-}
+    return true;
+};
 
 
 SKSEPluginLoad(const SKSE::LoadInterface* skse) {
-
     SKSE::Init(skse);
 
     SKSE::GetPapyrusInterface()->Register(PapyrusFunctions);
 
     SKSE::GetMessagingInterface()->RegisterListener([](SKSE::MessagingInterface::Message* message) {
         if (message->type == SKSE::MessagingInterface::kDataLoaded) {
-            // Attempt to launch Mantella.exe when the game data is loaded
-            if (LaunchMantellaExe()) {
-                RE::ConsoleLog::GetSingleton()->Print("Mantella.exe launched successfully!");
+            //Get running instances of Mantella.exe here. In case there are any, we don't force spawn the integrated one.
+            std::vector<HANDLE> existingProcesses = LocateExistingMantellaProcesses();
+            if (existingProcesses.size() == 0) {
+                // Attempt to launch Mantella.exe when the game data is loaded
+                if (LaunchMantellaExe()) {
+                    RE::ConsoleLog::GetSingleton()->Print("Mantella.exe launched successfully!");
+                } else {
+                    RE::ConsoleLog::GetSingleton()->Print("Failed to launch Mantella.exe.");
+                }
             } else {
-                RE::ConsoleLog::GetSingleton()->Print("Failed to launch Mantella.exe.");
+                for (const HANDLE& i : existingProcesses) CloseHandle(i);//close the acquired handles, we will get new ones on a potential restart
+                RE::ConsoleLog::GetSingleton()->Print("Found running instance of Mantella.exe. Not starting a new one. You can still restart it from the MCM.");
             }
         }
     });
 
     return true;
-}
+};
