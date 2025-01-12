@@ -25,33 +25,48 @@ bool SetEnvironmentTempPath() {
 
     // Get the path to the Documents folder
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, NULL, &documentsPath))) {
-        newTempPath = std::wstring(documentsPath) + L"\\My Games\\Mantella\\data\\tmp";
+        bool useSecondary = wcsstr(documentsPath, L"OneDrive") != nullptr;
+
+        // Don't use the Documents path if it is synced to OneDrive (cloud)
+        // The large temp files can easily overflow the default 5GB free allocation
+        // Also, the temporary voice files get created, renamed and deleted rapidly,
+        // making it difficult for Onedrive and causing problems with locked files
+
+        if (!useSecondary) {
+            newTempPath = std::wstring(documentsPath) + L"\\My Games\\Mantella\\data\\tmp";
+
+            // Attempt to create the directory path if it doesn't exist
+            try {
+                std::filesystem::create_directories(newTempPath);
+                }
+            catch (const std::filesystem::filesystem_error& e) {
+                std::wcerr << L"Failed to create directory path: " << newTempPath << L". Error: " << e.what() << std::endl;
+                std::wcerr << L"Falling back to system temporary directory." << std::endl;
+                useSecondary = true;
+                }
+            }
         CoTaskMemFree(documentsPath);  // Release the memory
 
-        // Attempt to create the directory path if it doesn't exist
-        try {
-            std::filesystem::create_directories(newTempPath);
-        } catch (const std::filesystem::filesystem_error& e) {
-            std::wcerr << L"Failed to create directory path: " << newTempPath << L". Error: " << e.what() << std::endl;
-            std::wcerr << L"Falling back to system temporary directory." << std::endl;
-
-            // Fallback to system temp directory
+        if (useSecondary) {            // Fallback to system temp directory
             wchar_t tempPath[MAX_PATH];
             if (GetTempPath(MAX_PATH, tempPath) != 0) {
                 newTempPath = std::wstring(tempPath) + L"Mantella";
                 try {
                     std::filesystem::create_directories(newTempPath);
-                } catch (const std::filesystem::filesystem_error& e) {
+                    }
+                catch (const std::filesystem::filesystem_error& e) {
                     std::wcerr << L"Failed to create fallback directory: " << newTempPath << L". Error: " << e.what()
-                               << std::endl;
+                        << std::endl;
                     return false;
+                    }
                 }
-            } else {
+            else {
                 std::cerr << "Failed to get system temporary directory." << std::endl;
                 return false;
+                }
             }
         }
-    } else {
+    else {
         std::cerr << "Failed to get Documents folder path." << std::endl;
         return false;
     }
